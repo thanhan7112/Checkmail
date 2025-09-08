@@ -47,7 +47,6 @@ ROLE_ACCOUNTS = {
 # ==========               CÁC HÀM KIỂM TRA EMAIL               ==========
 # ==============================================================================
 
-# ---------- 1. Kiểm tra bằng Abstract API (Dùng khi cần độ chính xác cao) ----------
 def check_email_api(email):
     """Gửi yêu cầu đến Abstract API để xác thực email."""
     for api_key in API_KEYS:
@@ -60,27 +59,18 @@ def check_email_api(email):
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 401:
-                # Key không hợp lệ hoặc hết hạn, thử key tiếp theo
                 continue
         except requests.exceptions.RequestException:
-            # Lỗi mạng hoặc timeout, thử key tiếp theo
             continue
     return None
 
-# ---------- 2. Lấy MX record (Phương pháp nâng cao) ----------
 def get_mx_records_robust(domain):
-    """
-    Lấy bản ghi MX của một tên miền.
-    Ưu tiên sử dụng thư viện dnspython, nếu thất bại sẽ dùng Google DNS API làm dự phòng.
-    """
-    # Cách 1: Dùng dnspython (chính thống và đáng tin cậy hơn)
+    """Lấy bản ghi MX của một tên miền một cách mạnh mẽ."""
     try:
         records = dns.resolver.resolve(domain, 'MX')
-        # Sắp xếp theo mức độ ưu tiên (số nhỏ hơn = ưu tiên cao hơn)
         mx_records = sorted([(r.preference, r.exchange.to_text()) for r in records])
         return mx_records
     except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.Timeout):
-        # Cách 2: Dự phòng bằng Google DNS API
         try:
             r = requests.get(f"https://dns.google/resolve?name={domain}&type=MX", timeout=5)
             r.raise_for_status()
@@ -97,185 +87,181 @@ def get_mx_records_robust(domain):
     except Exception:
         return []
 
-# ---------- 3. Kiểm tra miễn phí nâng cao (Cải tiến) ----------
 def check_email_free_super_advanced(email):
+    """Thực hiện kiểm tra email nhiều bước mà không cần API."""
     result = {
-        "email": email, "deliverability": "UNKNOWN", "quality_score": "-",
-        "is_valid_format": {"value": False, "text": "FALSE"},
-        "is_free_email": {"value": False, "text": "FALSE"},
-        "is_disposable_email": {"value": False, "text": "FALSE"},
-        "is_role_email": {"value": False, "text": "FALSE"},
-        "is_catchall_email": {"value": False, "text": "UNKNOWN"},
-        "is_mx_found": {"value": False, "text": "FALSE"},
+        "email": email, "deliverability": "UNKNOWN",
+        "is_valid_format": {"value": False}, "is_free_email": {"value": False},
+        "is_disposable_email": {"value": False}, "is_role_email": {"value": False},
+        "is_catchall_email": {"value": False}, "is_mx_found": {"value": False},
         "is_smtp_valid": {"value": False, "text": "UNKNOWN"},
     }
-
-    # Bước 1: Kiểm tra định dạng bằng Regex
     regex = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
     if not re.match(regex, email):
         result["deliverability"] = "UNDELIVERABLE"
         return result
-    result["is_valid_format"] = {"value": True, "text": "TRUE"}
-
+    result["is_valid_format"]["value"] = True
     local_part, domain = email.split("@")
-
-    # Bước 2: Phân loại email dựa trên danh sách có sẵn
-    if domain in FREE_DOMAINS:
-        result["is_free_email"] = {"value": True, "text": "TRUE"}
+    if domain in FREE_DOMAINS: result["is_free_email"]["value"] = True
     if domain in DISPOSABLE_DOMAINS:
-        result["is_disposable_email"] = {"value": True, "text": "TRUE"}
+        result["is_disposable_email"]["value"] = True
         result["deliverability"] = "UNDELIVERABLE"
         return result
-    if local_part.lower() in ROLE_ACCOUNTS:
-        result["is_role_email"] = {"value": True, "text": "TRUE"}
-
-    # Bước 3: Tìm kiếm bản ghi MX
+    if local_part.lower() in ROLE_ACCOUNTS: result["is_role_email"]["value"] = True
     mx_records = get_mx_records_robust(domain)
     if not mx_records:
         result["deliverability"] = "UNDELIVERABLE"
         return result
-    result["is_mx_found"] = {"value": True, "text": "TRUE"}
-
-    # Tạm tin tưởng các nhà cung cấp email miễn phí lớn vì họ thường chặn kiểm tra SMTP
+    result["is_mx_found"]["value"] = True
     if result["is_free_email"]["value"]:
         result["deliverability"] = "DELIVERABLE"
-        result["is_smtp_valid"] = {"value": True, "text": "TRUE"}
+        result["is_smtp_valid"]["value"] = True
         return result
-
-    # Bước 4: Kiểm tra SMTP nâng cao
     for _, mx_record in mx_records:
         try:
-            with smtplib.SMTP(mx_record, 25, timeout=10) as server:
+            with smtplib.SMTP(mx_record, 25, timeout=15) as server:
                 server.set_debuglevel(0)
                 hostname = socket.getfqdn() or 'example.com'
                 server.ehlo(hostname)
+                if server.has_extn('starttls'):
+                    server.starttls()
+                    server.ehlo(hostname)
                 server.mail(f'verify@{hostname}')
-                
-                # Kiểm tra email thật
                 code, _ = server.rcpt(str(email))
-                
-                if code == 250: # Mã 250: OK, email tồn tại
-                    result["is_smtp_valid"] = {"value": True, "text": "TRUE"}
+                if code == 250:
+                    result["is_smtp_valid"]["value"] = True
                     result["deliverability"] = "DELIVERABLE"
-
-                    # --> Bắt đầu kiểm tra Catch-all <--
-                    random_local = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(20))
-                    random_email = f"{random_local}@{domain}"
-                    code_catchall, _ = server.rcpt(random_email)
-                    
+                    random_local = ''.join(random.choice(string.ascii_lowercase) for _ in range(20))
+                    code_catchall, _ = server.rcpt(f"{random_local}@{domain}")
                     if code_catchall == 250:
-                        result["is_catchall_email"] = {"value": True, "text": "TRUE"}
+                        result["is_catchall_email"]["value"] = True
                         result["deliverability"] = "RISKY"
-                    else:
-                        result["is_catchall_email"] = {"value": False, "text": "FALSE"}
-                    
-                    return result # Đã có kết quả, thoát hoàn toàn
-
-                elif code >= 500: # Mã 5xx: Lỗi vĩnh viễn, email không tồn tại
-                    result["is_smtp_valid"] = {"value": False, "text": "FALSE"}
+                    return result
+                elif 450 <= code <= 452:
+                    result["deliverability"] = "RISKY"
+                    result["is_smtp_valid"]["text"] = "GREYLISTED"
+                elif code >= 500:
                     result["deliverability"] = "UNDELIVERABLE"
                     return result
-                
-                # Nếu mã là 4xx (lỗi tạm thời), ta không làm gì và để vòng lặp thử MX record tiếp theo
-
         except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, socket.timeout):
-            continue # Lỗi kết nối, thử MX record tiếp theo
+            continue
         except Exception:
-            result["deliverability"] = "UNKNOWN" # Lỗi không xác định, dừng lại
-            return result
-            
+            continue
     return result
 
 # ==============================================================================
 # ==========                  GIAO DIỆN STREAMLIT                 ==========
 # ==============================================================================
 
-st.set_page_config(page_title="Công cụ kiểm tra Email", layout="wide", initial_sidebar_state="collapsed")
-st.title("📧 Công cụ kiểm tra Email (Phiên bản nâng cấp)")
+st.set_page_config(page_title="Công cụ kiểm tra Email hàng loạt", layout="wide")
+st.title("📧 Công cụ kiểm tra Email hàng loạt từ File Excel/CSV")
 
-emails_input = st.text_area(
-    "Nhập danh sách email (mỗi email một dòng):",
-    height=250,
-    placeholder="example@gmail.com\nsupport@company.com\nwrong-email@domain",
-)
-
-if st.button("🚀 Bắt đầu kiểm tra", use_container_width=True):
-    emails = [e.strip().lower() for e in emails_input.splitlines() if e.strip()]
-    
-    if not emails:
-        st.warning("Vui lòng nhập ít nhất một email để kiểm tra.")
+def map_result_to_status(result):
+    """Chuyển đổi dictionary kết quả chi tiết thành một chuỗi trạng thái đơn giản."""
+    deliverability = result.get("deliverability", "UNKNOWN").upper()
+    is_disposable = result.get("is_disposable_email", {}).get("value", False)
+    is_valid_format = result.get("is_valid_format", {}).get("value", False)
+    if not is_valid_format:
+        return "❌ Sai định dạng"
+    if is_disposable:
+        return "🗑️ Email tạm thời"
+    if deliverability == "DELIVERABLE":
+        return "✅ Hợp lệ"
+    elif deliverability == "UNDELIVERABLE":
+        return "🚫 Không hợp lệ"
+    elif deliverability == "RISKY":
+        return "⚠️ Rủi ro (Catch-all/Greylisted)"
     else:
-        results = []
-        progress_bar = st.progress(0, text="Bắt đầu...")
-        status_text = st.empty()
+        return "❓ Không xác định"
 
-        for i, email in enumerate(emails):
-            status_text.text(f"⚙️ Đang kiểm tra: {email} ({i+1}/{len(emails)})")
+tab1, tab2 = st.tabs(["📁 Tải lên File (Excel/CSV)", "✍️ Nhập thủ công"])
 
-            # Luôn chạy kiểm tra miễn phí trước
-            final_data = check_email_free_super_advanced(email)
-
-            # Quyết định có cần dùng API hay không
-            is_risky = final_data["deliverability"] in ["UNKNOWN", "RISKY"]
-            is_free = final_data["is_free_email"]["value"]
-            
-            if is_risky or is_free:
-                status_text.text(f"⚙️ Đang kiểm tra: {email} ({i+1}/{len(emails)}) - Cần xác thực sâu hơn, đang dùng API...")
-                api_data = check_email_api(email)
-                if api_data:
-                    # Nếu API thành công, dùng kết quả của API
-                    final_data = api_data
-            
-            # Chuẩn hóa dữ liệu để hiển thị
-            results.append({
-                "Email": final_data.get("email"),
-                "Khả năng gửi": final_data.get("deliverability", "-"),
-                "Điểm tin cậy": final_data.get("quality_score", "-"),
-                "Định dạng hợp lệ": "✅ Có" if final_data.get("is_valid_format", {}).get("value") else "❌ Không",
-                "Loại email": (
-                    "Miễn phí" if final_data.get("is_free_email", {}).get("value") else
-                    "Tạm thời" if final_data.get("is_disposable_email", {}).get("value") else
-                    "Chung" if final_data.get("is_role_email", {}).get("value") else
-                    "Bình thường"
-                ),
-                "Nhận tất cả (Catchall)": "✅ Có" if final_data.get("is_catchall_email", {}).get("value") else "❌ Không",
-                "Có MX record": "✅ Có" if final_data.get("is_mx_found", {}).get("value") else "❌ Không",
-                "SMTP hợp lệ": "✅ Có" if final_data.get("is_smtp_valid", {}).get("value") else "❌ Không",
-            })
-
-            progress_bar.progress((i + 1) / len(emails), text=f"Hoàn thành {i+1}/{len(emails)}")
-
-        status_text.success("🎉 Hoàn thành kiểm tra!")
-        df = pd.DataFrame(results)
-        
-        st.subheader("Bảng kết quả")
-        st.dataframe(df, use_container_width=True)
-
-        # Chức năng tải về
-        st.subheader("Tải về kết quả")
-        col1, col2 = st.columns(2)
-
-        # Tải về CSV
-        csv = df.to_csv(index=False).encode("utf-8")
-        with col1:
-            st.download_button(
-                label="📥 Tải về file CSV",
-                data=csv,
-                file_name="ket_qua_kiem_tra_email.csv",
-                mime="text/csv",
-                use_container_width=True,
+with tab1:
+    st.header("1. Tải lên file của bạn")
+    uploaded_file = st.file_uploader(
+        "Chọn file .xlsx hoặc .csv",
+        type=["xlsx", "csv"]
+    )
+    if uploaded_file:
+        try:
+            df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('xlsx') else pd.read_csv(uploaded_file)
+            st.info(f"Đã tải lên file: **{uploaded_file.name}** với **{len(df)}** dòng.")
+            st.dataframe(df.head(), use_container_width=True)
+            st.header("2. Chọn cột chứa email")
+            email_column = st.selectbox(
+                "Chọn tên cột email từ file của bạn:",
+                df.columns,
+                index=None,
+                placeholder="-- Chọn một cột --"
             )
+            if email_column:
+                st.header("3. Bắt đầu kiểm tra")
+                if st.button("🚀 Bắt đầu kiểm tra file", key="file_check", use_container_width=True):
+                    results_status = []
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    total_rows = len(df)
+                    for i, row in df.iterrows():
+                        email = row[email_column]
+                        status_text.text(f"⚙️ Đang kiểm tra: {email} (Dòng {i+1}/{total_rows})")
+                        if not isinstance(email, str) or '@' not in email:
+                            results_status.append("Trống / Sai dữ liệu")
+                        else:
+                            final_data = check_email_free_super_advanced(email)
+                            is_risky = final_data["deliverability"] in ["UNKNOWN", "RISKY"]
+                            is_free = final_data.get("is_free_email", {}).get("value", False)
+                            if is_risky or is_free:
+                                api_data = check_email_api(email)
+                                if api_data:
+                                    final_data = api_data
+                            status = map_result_to_status(final_data)
+                            results_status.append(status)
+                        progress_bar.progress((i + 1) / total_rows)
+                    status_text.success("🎉 Hoàn thành kiểm tra file!")
+                    df_result = df.copy()
+                    df_result["Tình trạng xác thực"] = results_status
+                    st.subheader("Kết quả kiểm tra (xem trước 10 dòng đầu)")
+                    st.dataframe(df_result.head(10), use_container_width=True)
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df_result.to_excel(writer, index=False, sheet_name="Kết quả xác thực")
+                    
+                    st.download_button(
+                        label="📥 Tải về file Excel kết quả",
+                        data=output.getvalue(),
+                        file_name=f"ket_qua_{uploaded_file.name}",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+        except Exception as e:
+            st.error(f"Đã xảy ra lỗi khi đọc hoặc xử lý file: {e}")
 
-        # Tải về Excel
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Kết quả")
-        
-        with col2:
-            st.download_button(
-                label="📥 Tải về file Excel",
-                data=output.getvalue(),
-                file_name="ket_qua_kiem_tra_email.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+with tab2:
+    st.header("Nhập danh sách email (mỗi email một dòng)")
+    emails_input = st.text_area(
+        "Danh sách email:",
+        height=250,
+        placeholder="example@gmail.com\nsupport@company.com\n...",
+        label_visibility="collapsed"
+    )
+    if st.button("Kiểm tra danh sách nhập tay", key="manual_check", use_container_width=True):
+        emails = [e.strip().lower() for e in emails_input.splitlines() if e.strip()]
+        if not emails:
+            st.warning("Vui lòng nhập ít nhất một email.")
+        else:
+            results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            for i, email in enumerate(emails):
+                status_text.text(f"⚙️ Đang kiểm tra: {email} ({i+1}/{len(emails)})")
+                final_data = check_email_free_super_advanced(email)
+                is_risky = final_data["deliverability"] in ["UNKNOWN", "RISKY"]
+                is_free = final_data.get("is_free_email", {}).get("value", False)
+                if is_risky or is_free:
+                    api_data = check_email_api(email)
+                    if api_data:
+                        final_data = api_data
+                results.append({"Email": email, "Trạng thái": map_result_to_status(final_data)})
+                progress_bar.progress((i + 1) / len(emails))
+            status_text.success("🎉 Hoàn thành!")
+            st.dataframe(pd.DataFrame(results), use_container_width=True)
