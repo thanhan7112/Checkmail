@@ -15,7 +15,7 @@ def check_email(email, api_key):
         return {"error": str(e)}
 
 st.set_page_config(page_title="Công cụ kiểm tra Email", layout="wide")
-st.title("📧 Công cụ kiểm tra Email (AbstractAPI)")
+st.title("📧 Công cụ kiểm tra Email")
 
 emails_input = st.text_area("Nhập danh sách email (mỗi dòng 1 email):")
 
