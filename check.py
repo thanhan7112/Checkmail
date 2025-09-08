@@ -16,7 +16,9 @@ API_KEYS = [
     "8017751baaea40a7918a299257ef90fb",
     "e6539e72e81c4c948a336a22c40d6565",
     "ee110d38f1d1461f820317426c4fd709",
-    "73614f4f15a44082abb40c6d25feb13e"
+    "73614f4f15a44082abb40c6d25feb13e",
+    "a58021e0795b45e7bd3604f766d01809",
+    "14d136c854034f6f95edb27d5264833d"
 ]
 API_URL = "https://emailvalidation.abstractapi.com/v1/"
 COMMON_DOMAINS = ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com"]
