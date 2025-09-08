@@ -99,10 +99,6 @@ def get_mx_records_robust(domain):
 
 # ---------- 3. Kiểm tra miễn phí nâng cao (Cải tiến) ----------
 def check_email_free_super_advanced(email):
-    """
-    Thực hiện kiểm tra email nhiều bước mà không cần API.
-    Bao gồm: Regex, loại domain, MX record, và kiểm tra SMTP nâng cao (phát hiện catch-all).
-    """
     result = {
         "email": email, "deliverability": "UNKNOWN", "quality_score": "-",
         "is_valid_format": {"value": False, "text": "FALSE"},
@@ -196,12 +192,6 @@ def check_email_free_super_advanced(email):
 
 st.set_page_config(page_title="Công cụ kiểm tra Email", layout="wide", initial_sidebar_state="collapsed")
 st.title("📧 Công cụ kiểm tra Email (Phiên bản nâng cấp)")
-
-st.info(
-    "**Cách hoạt động:** Công cụ này kết hợp phương pháp kiểm tra miễn phí (Regex, MX, SMTP) và API trả phí.\n"
-    "1.  **Kiểm tra miễn phí trước:** Nhanh chóng loại bỏ các email sai định dạng, không có máy chủ hoặc tạm thời.\n"
-    "2.  **Dùng API khi cần:** Đối với các trường hợp khó (`UNKNOWN`, `RISKY`) hoặc các email miễn phí (Gmail, Outlook,...), công cụ sẽ gọi API để có kết quả chính xác nhất."
-)
 
 emails_input = st.text_area(
     "Nhập danh sách email (mỗi email một dòng):",
