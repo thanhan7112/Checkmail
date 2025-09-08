@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 
-API_KEYS = ["c985842edb6f4049a6d0977928cdc4a7"]
+API_KEYS = ["c985842edb6f4049a6d0977928cdc4a7", "0d1f2b3d9f054a2e9fdd398ae019a76b", "2b88713468ba46bdb602c007da9d12cc", "a2f856614f2d41aca555a01df86b0599"]
 API_URL = "https://emailvalidation.abstractapi.com/v1/"
 
 def check_email(email, api_key):
@@ -15,7 +15,7 @@ def check_email(email, api_key):
         return {"error": str(e)}
 
 st.set_page_config(page_title="Công cụ kiểm tra Email", layout="wide")
-st.title("📧 Công cụ kiểm tra Email")
+st.title("📧 Công cụ kiểm tra Email (Tạo bởi: Nguyen Thanh An)")
 
 emails_input = st.text_area("Nhập danh sách email (mỗi dòng 1 email):")
 
