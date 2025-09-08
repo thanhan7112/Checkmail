@@ -5,7 +5,6 @@ import pandas as pd
 API_KEYS = [
     "c985842edb6f4049a6d0977928cdc4a7",
 ]
-
 API_URL = "https://emailvalidation.abstractapi.com/v1/"
 
 def check_email(email, api_key):
@@ -18,7 +17,9 @@ def check_email(email, api_key):
     except Exception as e:
         return {"error": str(e)}
 
-st.title("🔎 Công cụ kiểm tra Email")
+# Giao diện Streamlit
+st.set_page_config(page_title="Công cụ kiểm tra Email", layout="wide")
+st.title("📧 Công cụ kiểm tra Email")
 
 emails_input = st.text_area("Nhập danh sách email (mỗi dòng 1 email):")
 
