@@ -18,7 +18,7 @@ def check_email(email, api_key):
     except Exception as e:
         return {"error": str(e)}
 
-st.title("🔎 Công cụ kiểm tra Email (AbstractAPI)")
+st.title("🔎 Công cụ kiểm tra Email")
 
 emails_input = st.text_area("Nhập danh sách email (mỗi dòng 1 email):")
 
