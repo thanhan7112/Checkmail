@@ -306,18 +306,6 @@ def process_email(email, session=None):
 st.set_page_config(page_title="Kiểm tra Email (Giới hạn concurrency)", layout="wide")
 st.title("📧 Kiểm tra Email — Giới hạn xử lý đồng thời để an toàn")
 
-st.markdown("**Tùy chỉnh giới hạn:** thay đổi số luồng / giới hạn SMTP / giới hạn API để cân bằng tốc độ và an toàn.")
-
-col1, col2, col3 = st.columns([1.5,1,1])
-with col1:
-    workers = st.slider("Số luồng tổng (ThreadPool)", 2, 40, 10)
-with col2:
-    smtp_concurrency = st.slider("Kết nối SMTP đồng thời", 1, 20, 5)
-with col3:
-    api_concurrency = st.slider("Request API đồng thời", 1, 20, 5)
-
-api_min_interval_ms = st.slider("Khoảng cách tối thiểu giữa 2 request trên cùng 1 key (ms)", 100, 2000, 500)
-
 emails_input = st.text_area("Nhập danh sách email (mỗi email 1 dòng):", height=220)
 start_btn = st.button("🚀 Bắt đầu (Giới hạn an toàn)")
 
