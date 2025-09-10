@@ -50,170 +50,196 @@ API_KEYS = [
     "eee59da670144a1caea47114dce72bb7",
 ]
 
+# ========== CÀI ĐẶT CỐ ĐỊNH (KHÔNG CHO NGƯỜI DÙNG THAY ĐỔI) ==========
+WORKERS = 10                 # số luồng tổng xử lý
+SMTP_CONCURRENCY = 5         # số kết nối SMTP đồng thời tối đa
+API_CONCURRENCY = 5          # số request API đồng thời tối đa
+API_MIN_INTERVAL_MS = 500    # ms: khoảng tối thiểu giữa 2 request trên cùng 1 API key
+
 API_URL = "https://emailvalidation.abstractapi.com/v1/"
 
-FREE_DOMAINS = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "aol.com", "icloud.com", "mail.com", "yandex.com", "protonmail.com"}
-DISPOSABLE_DOMAINS = {"10minutemail.com", "temp-mail.org", "mailinator.com", "yopmail.com", "guerrillamail.com"}
-ROLE_ACCOUNTS = {"admin", "support", "info", "contact", "sales", "hr", "billing", "postmaster", "abuse", "noreply", "marketing"}
+# Các danh sách domain/tài khoản vai trò
+FREE_DOMAINS = {
+    "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "aol.com",
+    "icloud.com", "mail.com", "yandex.com", "protonmail.com"
+}
+DISPOSABLE_DOMAINS = {
+    "10minutemail.com", "temp-mail.org", "mailinator.com", "yopmail.com",
+    "guerrillamail.com"
+}
+ROLE_ACCOUNTS = {
+    "admin", "support", "info", "contact", "sales", "hr", "billing",
+    "postmaster", "abuse", "noreply", "marketing"
+}
 
-# ========== QUẢN LÝ API KEY VỚI RATE LIMIT ==========
+# ========== Quản lý API key với rate-limit per key ==========
 class ApiKeyManager:
-    """
-    Quản lý xoay vòng API key và đảm bảo mỗi key không bị gọi quá nhanh.
-    - keys: list các API key
-    - min_interval_ms: khoảng tối thiểu giữa 2 request trên cùng 1 key (ms)
-    """
     def __init__(self, keys, min_interval_ms=500):
         self.keys = list(keys)
         self.min_interval_ms = min_interval_ms
         self.lock = threading.Lock()
-        # last used timestamp per key (epoch seconds)
         self.last_used = {k: 0.0 for k in self.keys}
         self.index = 0
 
-    def get_key(self, wait_if_needed=True, timeout=5.0):
-        """
-        Trả về (key, wait_ms) hoặc (None, None) nếu không lấy được key trong timeout.
-        Nếu wait_if_needed=True sẽ chờ 1 khoảng nhỏ nếu key gần đây vừa dùng.
-        """
+    def get_key(self, timeout=5.0):
+        """Trả về key sẵn sàng dùng trong timeout (hoặc None)."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self.lock:
                 if not self.keys:
                     return None
-                # thử xoay từ current index
+                # thử từng key tuần tự
                 for _ in range(len(self.keys)):
                     key = self.keys[self.index % len(self.keys)]
                     self.index += 1
                     last = self.last_used.get(key, 0.0)
                     elapsed_ms = (time.time() - last) * 1000.0
                     if elapsed_ms >= self.min_interval_ms:
-                        # mark used now and trả về
                         self.last_used[key] = time.time()
                         return key
-                # nếu không có key sẵn sàng, break lock và chờ
-            # chờ 50ms trước khi thử lại
             time.sleep(0.05)
         return None
 
-# tạo manager mặc định (min interval 500ms/key)
-api_key_manager = ApiKeyManager(API_KEYS, min_interval_ms=500)
+_api_manager = ApiKeyManager(API_KEYS, min_interval_ms=API_MIN_INTERVAL_MS)
 
-# ========== SEMAPHORE / LIMITS (các giá trị mặc định có thể override từ UI) ==========
-# Các semaphore sẽ được khởi tạo lại khi user bắt đầu chạy (từ các tùy chọn UI)
-SMTP_SEMAPHORE = None
-API_SEMAPHORE = None
+# Semaphores cố định (khi chạy sẽ dùng chúng)
+SMTP_SEMAPHORE = threading.Semaphore(SMTP_CONCURRENCY)
+API_SEMAPHORE = threading.Semaphore(API_CONCURRENCY)
 
-# ========== HÀM GỌI ABSTRACT API (sử dụng ApiKeyManager & API_SEMAPHORE) ==========
+# ========== HỖ TRỢ REQUESTS ==========
+def requests_get(session, url, **kwargs):
+    try:
+        r = session.get(url, **kwargs)
+        r.raise_for_status()
+        return r
+    except Exception:
+        return None
+
+# ========== GỌI ABSTRACT API (XOAY KEY, Hạn chế concurrency bằng API_SEMAPHORE) ==========
 def check_email_api(email, session=None):
-    """
-    Gọi AbstractAPI với giới hạn concurrency (API_SEMAPHORE) và rate-limit per key (ApiKeyManager).
-    Trả về JSON nếu OK, hoặc None nếu tất cả thất bại.
-    """
-    global API_SEMAPHORE, api_key_manager
     if session is None:
         session = requests.Session()
 
-    # nếu không có semaphore (chưa cấu hình), fallback không giới hạn
-    if API_SEMAPHORE is None:
-        api_semaphore_acquired = False
-    else:
-        api_semaphore_acquired = API_SEMAPHORE.acquire(timeout=10)
+    acquired = False
+    try:
+        acquired = API_SEMAPHORE.acquire(timeout=10)
+    except Exception:
+        acquired = False
 
     try:
-        # Lấy key từ manager (get_key sẽ chịu trách nhiệm delay nếu cần)
-        key = api_key_manager.get_key(wait_if_needed=True, timeout=10.0)
+        key = _api_manager.get_key(timeout=10.0)
         if not key:
             return None
         params = {"api_key": key, "email": email}
-        # dùng requests session
         try:
             r = session.get(API_URL, params=params, timeout=12)
             if r is None:
                 return None
             if r.status_code == 200:
                 return r.json()
-            # nếu 401 hoặc lỗi khác -> trả None để caller quyết định
             return None
         except Exception:
             return None
     finally:
-        if api_semaphore_acquired:
+        if acquired:
             API_SEMAPHORE.release()
 
-# ========== HÀM GET MX (dùng Google DNS HTTP) ==========
-def get_mx_records(domain, session=None):
+# ========== LẤY MX RECORD (dùng dnspython nếu có; fallback Google DNS HTTP) ==========
+def get_mx_records_robust(domain, session=None):
     if session is None:
         session = requests.Session()
     try:
-        r = session.get(f"https://dns.google/resolve?name={domain}&type=MX", timeout=5)
+        # thử dnspython nếu môi trường có
+        import dns.resolver
+        try:
+            answers = dns.resolver.resolve(domain, "MX")
+            mx = sorted([(r.preference, r.exchange.to_text()) for r in answers])
+            return mx
+        except Exception:
+            pass
+    except Exception:
+        # dnspython không có hoặc lỗi -> fallback HTTP
+        pass
+
+    # Fallback: Google DNS-over-HTTPS
+    try:
+        url = f"https://dns.google/resolve?name={domain}&type=MX"
+        r = requests_get(session, url, timeout=5)
         if r is None:
             return []
         data = r.json()
-        if "Answer" in data:
-            answers = []
-            for ans in data.get("Answer", []):
-                if ans.get("type") == 15:
-                    parts = ans["data"].split()
-                    if len(parts) >= 2:
-                        pref = int(parts[0]); exch = parts[1]
-                        answers.append((pref, exch.rstrip('.')))
-            answers.sort(key=lambda x: x[0])
-            return answers
+        answers = []
+        for ans in data.get("Answer", []):
+            if ans.get("type") == 15:
+                parts = ans["data"].split()
+                if len(parts) >= 2:
+                    pref = int(parts[0]); exch = parts[1]
+                    answers.append((pref, exch.rstrip(".")))
+        answers.sort(key=lambda x: x[0])
+        return answers
     except Exception:
         return []
-    return []
 
-# ========== FREE CHECK (Regex + MX + SMTP) ========== 
-def check_email_free(email, session=None):
+# ========== FREE CHECK (Regex + MX + SMTP) ==========
+def check_email_free_super_advanced(email, session=None):
     if session is None:
         session = requests.Session()
+
     result = {
         "email": email,
         "deliverability": "UNKNOWN",
-        "is_valid_format": {"value": False},
-        "is_free_email": {"value": False},
-        "is_disposable_email": {"value": False},
-        "is_role_email": {"value": False},
-        "is_catchall_email": {"value": False},
-        "is_mx_found": {"value": False},
+        "quality_score": "-",
+        "is_valid_format": {"value": False, "text": "FALSE"},
+        "is_free_email": {"value": False, "text": "FALSE"},
+        "is_disposable_email": {"value": False, "text": "FALSE"},
+        "is_role_email": {"value": False, "text": "FALSE"},
+        "is_catchall_email": {"value": False, "text": "UNKNOWN"},
+        "is_mx_found": {"value": False, "text": "FALSE"},
         "is_smtp_valid": {"value": False, "text": "UNKNOWN"},
     }
-    # Regex
+
+    # 1) Regex
     regex = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
     if not re.match(regex, email):
         result["deliverability"] = "UNDELIVERABLE"
         return result
-    result["is_valid_format"]["value"] = True
+    result["is_valid_format"] = {"value": True, "text": "TRUE"}
 
     local, domain = email.split("@", 1)
     domain = domain.lower()
     if domain in FREE_DOMAINS:
-        result["is_free_email"]["value"] = True
+        result["is_free_email"] = {"value": True, "text": "TRUE"}
     if domain in DISPOSABLE_DOMAINS:
-        result["is_disposable_email"]["value"] = True
+        result["is_disposable_email"] = {"value": True, "text": "TRUE"}
         result["deliverability"] = "UNDELIVERABLE"
         return result
     if local.lower() in ROLE_ACCOUNTS:
-        result["is_role_email"]["value"] = True
+        result["is_role_email"] = {"value": True, "text": "TRUE"}
 
-    mx_records = get_mx_records(domain, session=session)
+    # 2) MX lookup
+    mx_records = get_mx_records_robust(domain, session=session)
     if not mx_records:
         result["deliverability"] = "UNDELIVERABLE"
         return result
-    result["is_mx_found"]["value"] = True
+    result["is_mx_found"] = {"value": True, "text": "TRUE"}
 
+    # 3) Nếu domain miễn phí (Gmail...) -> skip SMTP (thường chặn)
     if result["is_free_email"]["value"]:
         result["deliverability"] = "DELIVERABLE"
         result["is_smtp_valid"] = {"value": True, "text": "TRUE"}
         return result
 
-    # SMTP check — chú ý: giới hạn đồng thời bằng SMTP_SEMAPHORE (khởi tạo ở runtime)
-    global SMTP_SEMAPHORE
+    # 4) SMTP check (cố định concurrency bằng SMTP_SEMAPHORE)
     for _, mx in mx_records:
-        mx_host = mx
-        # acquire semaphore (nếu có)
-        acquired = SMTP_SEMAPHORE.acquire(timeout=20) if SMTP_SEMAPHORE is not None else True
+        mx_host = mx.rstrip(".")
+        acquired = False
+        try:
+            acquired = SMTP_SEMAPHORE.acquire(timeout=20)
+        except Exception:
+            acquired = False
+        if not acquired:
+            # không lấy được semaphore trong timeout -> continue next mx
+            continue
         try:
             try:
                 with smtplib.SMTP(mx_host, 25, timeout=15) as server:
@@ -233,7 +259,7 @@ def check_email_free(email, session=None):
                     if code == 250:
                         result["is_smtp_valid"] = {"value": True, "text": "TRUE"}
                         result["deliverability"] = "DELIVERABLE"
-                        # catch-all check
+                        # catch-all test
                         try:
                             random_local = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(16))
                             code2, _ = server.rcpt(f"{random_local}@{domain}")
@@ -250,6 +276,7 @@ def check_email_free(email, session=None):
                         result["is_smtp_valid"]["text"] = "GREYLISTED"
                         continue
                     elif code >= 500:
+                        # mark risky to force API re-check later
                         result["deliverability"] = "RISKY"
                         result["is_smtp_valid"]["text"] = "SMTP_REJECTION"
                         return result
@@ -259,96 +286,177 @@ def check_email_free(email, session=None):
             except Exception:
                 continue
         finally:
-            if SMTP_SEMAPHORE is not None and acquired:
+            if acquired:
                 SMTP_SEMAPHORE.release()
+
     return result
 
-# ========== WORKER xử lý 1 email ==========
-def process_email(email, session=None):
-    if session is None:
-        session = requests.Session()
+# ========== Worker: xử lý 1 email ==========
+def process_email_worker(email):
+    session = requests.Session()
     try:
-        free_res = check_email_free(email, session=session)
+        free_res = check_email_free_super_advanced(email, session=session)
     except Exception:
         free_res = {"email": email, "deliverability": "UNKNOWN", "is_valid_format": {"value": False}, "is_free_email": {"value": False}}
-    need_api = (free_res.get("deliverability") in ["UNKNOWN", "RISKY"]) or free_res.get("is_free_email", {}).get("value", False)
+
+    need_api = False
+    if free_res.get("deliverability") in ["UNKNOWN", "RISKY"]:
+        need_api = True
+    if free_res.get("is_free_email", {}).get("value", False):
+        need_api = True
+
     final = free_res
     if need_api:
         api_res = check_email_api(email, session=session)
         if api_res:
             final = api_res
-    # map result
-    status_raw = final.get("deliverability", "UNKNOWN")
+
+    # map to human-friendly status
+    status_raw = (final.get("deliverability") or "").upper()
     is_valid_fmt = final.get("is_valid_format", {}).get("value", False)
     is_disposable = final.get("is_disposable_email", {}).get("value", False)
+
     if not is_valid_fmt:
-        disp = "❌ Sai định dạng"
+        display_status = "❌ Sai định dạng"
     elif is_disposable:
-        disp = "🗑️ Email tạm thời"
+        display_status = "🗑️ Email tạm thời"
     elif status_raw == "DELIVERABLE":
-        disp = "✅ Hợp lệ"
+        display_status = "✅ Hợp lệ"
     elif status_raw == "UNDELIVERABLE":
-        disp = "🚫 Không hợp lệ"
+        display_status = "🚫 Không hợp lệ"
     elif status_raw == "RISKY":
-        disp = "⚠️ Rủi ro"
+        display_status = "⚠️ Rủi ro (Cần API)"
     else:
-        disp = "❓ Không xác định"
+        display_status = "❓ Không xác định"
+
     return {
         "Email": final.get("email", email),
-        "Trạng thái": disp,
+        "Trạng thái": display_status,
         "Khả năng gửi (raw)": final.get("deliverability", "-"),
+        "Điểm tin cậy": final.get("quality_score", "-"),
         "Định dạng hợp lệ": "Có" if is_valid_fmt else "Không",
+        "Loại email": (
+            "Miễn phí" if final.get("is_free_email", {}).get("value") else
+            "Tạm thời" if final.get("is_disposable_email", {}).get("value") else
+            "Chung" if final.get("is_role_email", {}).get("value") else
+            "Bình thường"
+        ),
+        "Catch-all": "Có" if final.get("is_catchall_email", {}).get("value") else "Không",
         "MX record": "Có" if final.get("is_mx_found", {}).get("value") else "Không",
         "SMTP hợp lệ": "Có" if final.get("is_smtp_valid", {}).get("value") else "Không",
     }
 
-# ========== GIAO DIỆN STREAMLIT ==========
-st.set_page_config(page_title="Kiểm tra Email (Giới hạn concurrency)", layout="wide")
-st.title("📧 Kiểm tra Email — Giới hạn xử lý đồng thời để an toàn")
+# ========== UI Streamlit (tabs: Upload / Manual) ==========
+st.set_page_config(page_title="Kiểm tra Email (Cố định concurrency)", layout="wide")
+st.title("📧 Kiểm tra Email hàng loạt — Giới hạn cố định (an toàn)")
 
-emails_input = st.text_area("Nhập danh sách email (mỗi email 1 dòng):", height=220)
-start_btn = st.button("🚀 Bắt đầu (Giới hạn an toàn)")
+st.markdown(f"""
+**Thiết lập cố định (không cho sửa):**
+- Số luồng tổng: **{WORKERS}**  
+- Kết nối SMTP đồng thời: **{SMTP_CONCURRENCY}**  
+- Request API đồng thời: **{API_CONCURRENCY}**  
+- Khoảng cách tối thiểu trên mỗi API key: **{API_MIN_INTERVAL_MS} ms**
+""")
 
-# khởi tạo semaphore & api manager theo cấu hình UI
-if start_btn:
-    # update global semaphores & api manager
-    SMTP_SEMAPHORE = threading.Semaphore(smtp_concurrency)
-    API_SEMAPHORE = threading.Semaphore(api_concurrency)
-    # recreate api manager with new min interval
-    api_key_manager = ApiKeyManager(API_KEYS, min_interval_ms=api_min_interval_ms)
+tab1, tab2 = st.tabs(["📁 Tải file (Excel/CSV)", "✍️ Nhập thủ công"])
 
-    emails = [e.strip() for e in emails_input.splitlines() if e.strip()]
-    if not emails:
-        st.warning("Vui lòng nhập ít nhất một email.")
-    else:
-        total = len(emails)
-        progress = st.progress(0)
-        status = st.empty()
-        results = []
-        start_time = time.time()
-        # ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=workers) as exec:
-            futures = {exec.submit(process_email, e): e for e in emails}
-            done = 0
-            for fut in as_completed(futures):
-                e = futures[fut]
-                try:
-                    res = fut.result()
-                except Exception as ex:
-                    res = {"Email": e, "Trạng thái": f"⚠️ Lỗi: {ex}"}
-                results.append(res)
-                done += 1
-                progress.progress(done / total)
-                status.text(f"Đã xong {done}/{total} — hiện: {e}")
-        elapsed = time.time() - start_time
-        status.success(f"Hoàn tất {total} email trong {elapsed:.1f}s")
-        df = pd.DataFrame(results)
-        st.dataframe(df, use_container_width=True)
+with tab1:
+    st.header("1) Tải file Excel (.xlsx) hoặc CSV")
+    uploaded_file = st.file_uploader("Chọn file (.xlsx hoặc .csv)", type=["xlsx", "csv"])
+    if uploaded_file:
+        try:
+            df = pd.read_excel(uploaded_file) if uploaded_file.name.lower().endswith("xlsx") else pd.read_csv(uploaded_file)
+            st.info(f"Đã tải lên: **{uploaded_file.name}** — {len(df)} dòng")
+            st.dataframe(df.head(10), use_container_width=True)
+            st.subheader("Chọn cột chứa Email")
+            email_col = st.selectbox("Cột email:", df.columns.tolist())
+            if st.button("🚀 Bắt đầu kiểm tra file"):
+                emails = []
+                rows = []
+                for idx, row in df.iterrows():
+                    val = row[email_col]
+                    if pd.isna(val):
+                        emails.append(None)
+                    else:
+                        # nếu cell chứa nhiều email, lấy cái đầu tiên
+                        if isinstance(val, str):
+                            e = re.split(r"[,\s;]+", val.strip())[0]
+                            emails.append(e.lower())
+                        else:
+                            emails.append(str(val).lower())
+                total = len(emails)
+                progress = st.progress(0)
+                status = st.empty()
+                results = []
+                start = time.time()
+                with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+                    futures = {executor.submit(process_email_worker, e if e else ""): i for i, e in enumerate(emails)}
+                    done = 0
+                    # preserve order by writing into results_list with index
+                    results_list = [None] * total
+                    for fut in as_completed(futures):
+                        idx = futures[fut]
+                        e = emails[idx] if emails[idx] else ""
+                        try:
+                            res = fut.result()
+                        except Exception as ex:
+                            res = {"Email": e, "Trạng thái": f"⚠️ Lỗi: {ex}"}
+                        results_list[idx] = res
+                        done += 1
+                        progress.progress(done / total)
+                        status.text(f"Đã xử lý {done}/{total}")
+                elapsed = time.time() - start
+                status.success(f"Hoàn tất {total} dòng trong {elapsed:.1f}s")
+                # gắn kết quả vào DataFrame
+                df_result = df.copy()
+                df_result["KQ_XácThực"] = [r["Trạng thái"] for r in results_list]
+                st.subheader("Kết quả (xem trước 10 dòng)")
+                st.dataframe(df_result.head(10), use_container_width=True)
+                # download file
+                csv = df_result.to_csv(index=False).encode("utf-8")
+                st.download_button("📥 Tải CSV kết quả", data=csv, file_name=f"ket_qua_{uploaded_file.name.split('.')[0]}.csv", mime="text/csv")
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    df_result.to_excel(writer, index=False, sheet_name="Kết quả")
+                st.download_button("📥 Tải Excel kết quả", data=output.getvalue(), file_name=f"ket_qua_{uploaded_file.name.split('.')[0]}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as e:
+            st.error(f"Đọc file lỗi: {e}")
 
-        # Download CSV/Excel
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("📥 Tải CSV", data=csv, file_name="ketqua.csv", mime="text/csv")
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Kết quả")
-        st.download_button("📥 Tải Excel", data=output.getvalue(), file_name="ketqua.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+with tab2:
+    st.header("Nhập danh sách email (mỗi dòng 1 email)")
+    emails_input = st.text_area("Danh sách email:", height=220, placeholder="example@gmail.com\nsupport@company.com\n...")
+    if st.button("🚀 Bắt đầu kiểm tra (nhập tay)"):
+        emails = [e.strip().lower() for e in emails_input.splitlines() if e.strip()]
+        if not emails:
+            st.warning("Vui lòng nhập ít nhất một email.")
+        else:
+            total = len(emails)
+            progress = st.progress(0)
+            status = st.empty()
+            results = []
+            start = time.time()
+            with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+                futures = {executor.submit(process_email_worker, e): i for i, e in enumerate(emails)}
+                done = 0
+                results_list = [None] * total
+                for fut in as_completed(futures):
+                    idx = futures[fut]
+                    e = emails[idx]
+                    try:
+                        res = fut.result()
+                    except Exception as ex:
+                        res = {"Email": e, "Trạng thái": f"⚠️ Lỗi: {ex}"}
+                    results_list[idx] = res
+                    done += 1
+                    progress.progress(done / total)
+                    status.text(f"Đã xử lý {done}/{total}")
+            elapsed = time.time() - start
+            status.success(f"Hoàn tất {total} email trong {elapsed:.1f}s")
+            df_out = pd.DataFrame(results_list)
+            st.dataframe(df_out, use_container_width=True)
+            csv = df_out.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Tải CSV kết quả", data=csv, file_name="ket_qua_emails.csv", mime="text/csv")
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_out.to_excel(writer, index=False, sheet_name="Kết quả")
+            st.download_button("📥 Tải Excel kết quả", data=output.getvalue(), file_name="ket_qua_emails.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
