@@ -350,14 +350,6 @@ def process_email_worker(email):
 st.set_page_config(page_title="Kiểm tra Email (Cố định concurrency)", layout="wide")
 st.title("📧 Kiểm tra Email hàng loạt — Giới hạn cố định (an toàn)")
 
-st.markdown(f"""
-**Thiết lập cố định (không cho sửa):**
-- Số luồng tổng: **{WORKERS}**  
-- Kết nối SMTP đồng thời: **{SMTP_CONCURRENCY}**  
-- Request API đồng thời: **{API_CONCURRENCY}**  
-- Khoảng cách tối thiểu trên mỗi API key: **{API_MIN_INTERVAL_MS} ms**
-""")
-
 tab1, tab2 = st.tabs(["📁 Tải file (Excel/CSV)", "✍️ Nhập thủ công"])
 
 with tab1:
