@@ -37,10 +37,53 @@ API_KEYS = [
     "eee59da670144a1caea47114dce72bb7",
 ]
 API_URL = "https://emailvalidation.abstractapi.com/v1/"
-FREE_DOMAINS = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "aol.com", "icloud.com"}
-DISPOSABLE_DOMAINS = {"10minutemail.com", "temp-mail.org", "mailinator.com", "yopmail.com"}
-ROLE_ACCOUNTS = {"admin", "support", "info", "contact", "sales", "hr", "billing", "postmaster"}
-MAX_WORKERS = 10
+
+# Cache cho disposable domains từ API
+DISPOSABLE_DOMAINS_CACHE = set()
+DISPOSABLE_CACHE_TIME = None
+
+def load_disposable_domains():
+    """Tải danh sách disposable domains từ API"""
+    global DISPOSABLE_DOMAINS_CACHE, DISPOSABLE_CACHE_TIME
+    try:
+        # Cache 24h
+        if DISPOSABLE_CACHE_TIME and (datetime.now() - DISPOSABLE_CACHE_TIME) < timedelta(hours=24):
+            return DISPOSABLE_DOMAINS_CACHE
+        
+        response = requests.get("https://disposable.debounce.io/?format=json", timeout=5)
+        if response.status_code == 200:
+            DISPOSABLE_DOMAINS_CACHE = set(response.json())
+            DISPOSABLE_CACHE_TIME = datetime.now()
+            return DISPOSABLE_DOMAINS_CACHE
+    except:
+        pass
+    
+    # Fallback nếu API lỗi
+    return {"10minutemail.com", "temp-mail.org", "mailinator.com", "yopmail.com", "guerrillamail.com", "throwaway.email"}
+
+def load_free_domains():
+    """Danh sách free domains phổ biến"""
+    return {
+        "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "aol.com", "icloud.com",
+        "mail.com", "yandex.com", "protonmail.com", "zoho.com", "gmx.com", "live.com",
+        "msn.com", "yahoo.co.uk", "yahoo.fr", "yahoo.de", "googlemail.com", "me.com",
+        "yahoo.co.jp", "yahoo.ca", "yahoo.com.au", "yahoo.co.in", "qq.com", "163.com",
+        "126.com", "sina.com", "yeah.net", "foxmail.com", "mail.ru", "yandex.ru"
+    }
+
+def load_role_accounts():
+    """Danh sách role accounts phổ biến"""
+    return {
+        "admin", "support", "info", "contact", "sales", "hr", "billing", "postmaster",
+        "abuse", "noreply", "no-reply", "marketing", "hello", "help", "service",
+        "team", "careers", "jobs", "press", "media", "webmaster", "hostmaster",
+        "privacy", "security", "legal", "feedback", "newsletter", "notification"
+    }
+
+# Khởi tạo
+FREE_DOMAINS = load_free_domains()
+DISPOSABLE_DOMAINS = load_disposable_domains()
+ROLE_ACCOUNTS = load_role_accounts()
 
 # ========== Quản lý API Key với Rate Limiting và Fingerprint Rotation ==========
 class APIKeyManager:
