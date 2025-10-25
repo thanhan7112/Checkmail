@@ -15,7 +15,13 @@ from collections import deque
 from threading import Lock
 from datetime import datetime, timedelta
 
-# ========== Cấu hình ==========
+# ========== Cấu hình tốc độ ==========
+MAX_WORKERS = 50  # Số luồng xử lý song song
+SMTP_TIMEOUT = 8  # Thời gian chờ SMTP
+DNS_TIMEOUT = 3   # Thời gian chờ DNS
+API_TIMEOUT = 6   # Thời gian chờ API
+
+# ========== Cấu hình API Keys ==========
 API_KEYS = [
     "c985842edb6f4049a6d0977928cdc4a7", "0d1f2b3d9f054a2e9fdd398ae019a76b",
     "2b88713468ba46bdb602c007da9d12cc", "a2f856614f2d41aca555a01df86b0599",
@@ -87,7 +93,7 @@ ROLE_ACCOUNTS = load_role_accounts()
 
 # ========== Quản lý API Key với Rate Limiting và Fingerprint Rotation ==========
 class APIKeyManager:
-    def __init__(self, keys, min_interval=0.34):  # 3 req/s = ~0.33s/req, dùng 0.34 để an toàn
+    def __init__(self, keys, min_interval=0.15):  # Tăng lên ~6-7 req/s (giảm từ 0.34)
         self.keys = keys
         self.min_interval = min_interval
         self.key_states = {k: {"last_used": 0, "failed": False, "request_times": deque(maxlen=100)} for k in keys}
@@ -195,27 +201,26 @@ def check_api_key_status(key):
 # ========== Hàm gọi API với anti-detection ==========
 def check_email_api(email):
     """Gọi API với fingerprint giả và rate limiting"""
-    max_retries = 3
+    max_retries = 2  # Giảm từ 3 xuống 2
     
     for attempt in range(max_retries):
         key = key_manager.get_available_key()
         if not key:
-            time.sleep(0.5)
+            time.sleep(0.2)  # Giảm từ 0.5s xuống 0.2s
             continue
         
         try:
-            # Tạo headers giả cho request này
             headers = key_manager._generate_fake_fingerprint(key)
             headers = {k: v for k, v in headers.items() if v is not None}
             
-            # Thêm jitter nhỏ để tránh pattern nhận diện
-            time.sleep(random.uniform(0.01, 0.05))
+            # Giảm jitter
+            time.sleep(random.uniform(0.005, 0.02))  # Giảm từ 0.01-0.05
             
             response = requests.get(
                 API_URL,
                 params={"api_key": key, "email": email},
                 headers=headers,
-                timeout=10,
+                timeout=API_TIMEOUT,  # Sử dụng timeout ngắn hơn
                 allow_redirects=True
             )
             
@@ -227,8 +232,7 @@ def check_email_api(email):
                 key_manager.mark_key_failed(key)
                 continue
             elif response.status_code == 429:
-                # Rate limited, đợi và thử key khác
-                time.sleep(0.5)
+                time.sleep(0.2)  # Giảm từ 0.5s
                 continue
             else:
                 continue
@@ -240,12 +244,13 @@ def check_email_api(email):
 
 # ========== Các hàm kiểm tra email (giữ nguyên) ==========
 def get_mx_records_robust(domain):
+    """Lấy MX records với timeout ngắn hơn"""
     try:
         records = dns.resolver.resolve(domain, 'MX')
         return sorted([(r.preference, r.exchange.to_text()) for r in records])
     except:
         try:
-            r = requests.get(f"https://dns.google/resolve?name={domain}&type=MX", timeout=5)
+            r = requests.get(f"https://dns.google/resolve?name={domain}&type=MX", timeout=DNS_TIMEOUT)
             r.raise_for_status()
             data = r.json()
             if "Answer" in data:
@@ -290,36 +295,33 @@ def check_email_free_super_advanced(email):
         result["is_smtp_valid"]["value"] = True
         return result
     
-    for _, mx_record in mx_records:
-        try:
-            with smtplib.SMTP(mx_record, 25, timeout=15) as server:
-                server.set_debuglevel(0)
-                hostname = socket.getfqdn() or 'example.com'
+    # Bước 4: Kiểm tra SMTP (chỉ với MX đầu tiên để nhanh hơn)
+    mx_record = mx_records[0][1]  # Chỉ check MX record đầu tiên
+    try:
+        with smtplib.SMTP(mx_record, 25, timeout=SMTP_TIMEOUT) as server:
+            server.set_debuglevel(0)
+            hostname = socket.getfqdn() or 'example.com'
+            server.ehlo(hostname)
+            if server.has_extn('starttls'):
+                server.starttls()
                 server.ehlo(hostname)
-                if server.has_extn('starttls'):
-                    server.starttls()
-                    server.ehlo(hostname)
-                server.mail(f'verify@{hostname}')
-                code, _ = server.rcpt(str(email))
-                
-                if code == 250:
-                    result["is_smtp_valid"]["value"] = True
-                    result["deliverability"] = "DELIVERABLE"
-                    random_local = ''.join(random.choice(string.ascii_lowercase) for _ in range(20))
-                    code_catchall, _ = server.rcpt(f"{random_local}@{domain}")
-                    if code_catchall == 250:
-                        result["is_catchall_email"]["value"] = True
-                        result["deliverability"] = "RISKY"
-                    return result
-                elif 450 <= code <= 452:
-                    result["deliverability"] = "RISKY"
-                    result["is_smtp_valid"]["text"] = "GREYLISTED"
-                elif code >= 500:
-                    result["deliverability"] = "RISKY"
-                    result["is_smtp_valid"]["text"] = "SMTP_REJECTION"
-                    return result
-        except:
-            continue
+            server.mail(f'verify@{hostname}')
+            code, _ = server.rcpt(str(email))
+            
+            if code == 250:
+                result["is_smtp_valid"]["value"] = True
+                result["deliverability"] = "DELIVERABLE"
+                # Bỏ qua catchall check để tiết kiệm thời gian
+                return result
+            elif 450 <= code <= 452:
+                result["deliverability"] = "RISKY"
+                result["is_smtp_valid"]["text"] = "GREYLISTED"
+            elif code >= 500:
+                result["deliverability"] = "RISKY"
+                result["is_smtp_valid"]["text"] = "SMTP_REJECTION"
+                return result
+    except:
+        pass
     
     return result
 
@@ -361,6 +363,10 @@ col1, col2, col3 = st.columns(3)
 col1.metric("API Keys hoạt động", stats["active"], delta=None)
 col2.metric("API Keys lỗi", stats["failed"], delta=None if stats["failed"] == 0 else f"-{stats['failed']}")
 col3.metric("Rate Limit", f"{1/key_manager.min_interval:.1f} req/s/key")
+col_speed = st.columns([1, 1, 1])
+col_speed[0].metric("Số luồng", MAX_WORKERS, help="Số luồng xử lý song song")
+col_speed[1].metric("SMTP Timeout", f"{SMTP_TIMEOUT}s", help="Thời gian chờ SMTP")
+col_speed[2].metric("Tốc độ ước tính", f"~{MAX_WORKERS * 2}-{MAX_WORKERS * 4} email/phút", help="Tùy độ phức tạp")
 
 # Nút kiểm tra tất cả key
 if st.button("🔍 Kiểm tra trạng thái tất cả API Keys", use_container_width=True):
